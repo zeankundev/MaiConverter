@@ -55,11 +55,13 @@ def convert_notes(simai_chart: SimaiChart, ma2_notes: Sequence[MaiNote]) -> None
             )
         elif isinstance(ma2_note, HoldNote):
             is_ex = note_type == NoteType.ex_hold
+            is_break = getattr(ma2_note, "is_break", False)
             simai_chart.add_hold(
                 measure=ma2_note.measure,
                 position=ma2_note.position,
                 duration=ma2_note.duration,
                 is_ex=is_ex,
+                is_break=is_break,
             )
         elif isinstance(ma2_note, SlideNote):
             # Ma2 slide durations does not include the delay

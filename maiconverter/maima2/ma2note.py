@@ -1,7 +1,7 @@
 import math
 from typing import Tuple
 
-from maiconverter.event import MaiNote, NoteType, Event, EventType
+from maiconverter.event import Event, EventType, MaiNote, NoteType
 from maiconverter.tool import slide_distance
 
 # Dictionary for a note type's representation in ma2
@@ -18,6 +18,10 @@ note_dict = {
     "XHO": 8,
     "TTP": 9,
     "THO": 10,
+    "BRHLD": 11,
+    "BXTP": 12,
+    "BXHLD": 13,
+    "BXST": 14,
     # "SLD": 11
 }
 
@@ -48,6 +52,7 @@ class SlideNote(MaiNote):
         pattern: int,
         duration: float,
         delay: float = 0.25,
+        is_chain: bool = False,
     ) -> None:
         """Produces a ma2 slide note.
 
@@ -82,6 +87,7 @@ class SlideNote(MaiNote):
         self.pattern = pattern
         self.delay = delay
         self.duration = duration
+        self.is_chain = is_chain
 
     def to_str(self, resolution: int = 384) -> str:
         measure = measure_to_ma2_time(self.measure, resolution)
@@ -91,6 +97,8 @@ class SlideNote(MaiNote):
             raise ValueError(f"Unknown slide pattern {self.pattern}")
 
         pattern = inv_slide_dict[self.pattern]
+        if self.is_chain:
+            pattern = "CN" + pattern
         delay = round(self.delay * resolution)
         duration = round(self.duration * resolution)
         return template.format(
@@ -111,6 +119,7 @@ class HoldNote(MaiNote):
         position: int,
         duration: float,
         is_ex: bool = False,
+        is_break: bool = False,
     ) -> None:
         """Produces a ma2 hold note.
 
@@ -134,6 +143,8 @@ class HoldNote(MaiNote):
         else:
             super().__init__(measure, position, NoteType.hold)
 
+        self.is_ex = is_ex
+        self.is_break = is_break
         self.duration = duration
 
     def to_str(self, resolution: int) -> str:
@@ -177,6 +188,10 @@ class TapNote(MaiNote):
             super().__init__(measure, position, NoteType.break_tap)
         elif not is_star and not is_break:
             super().__init__(measure, position, NoteType.tap)
+
+        self.is_break = is_break
+        self.is_ex = is_ex
+        self.is_star = is_star
 
     def to_str(self, resolution: int) -> str:
         measure = measure_to_ma2_time(self.measure, resolution)

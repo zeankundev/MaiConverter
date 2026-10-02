@@ -4,7 +4,7 @@ from fractions import Fraction
 from multiprocessing import Pool, Event
 import os
 
-from ..event import NoteType
+from ..event.note import NoteType
 from .simainote import (
     TapNote,
     HoldNote,
@@ -114,31 +114,25 @@ def get_measure_divisor(measures: List[float], max_den: int = 1000) -> Optional[
 def handle_tap(tap: TapNote, slides: List[SlideNote], counter: int) -> Tuple[str, int]:
     result = ""
     note_type = tap.note_type
-    if note_type in [NoteType.tap, NoteType.break_tap, NoteType.ex_tap]:
-        # Regular, break, and ex tap note
-        if note_type == NoteType.break_tap:
-            modifier_string = "b"
-        elif note_type == NoteType.ex_tap:
-            modifier_string = "x"
-        else:
-            modifier_string = ""
+    is_break = getattr(tap, "is_break", note_type in [NoteType.break_tap, NoteType.break_star])
+    is_ex = getattr(tap, "is_ex", note_type in [NoteType.ex_tap, NoteType.ex_star])
+    is_star = getattr(tap, "is_star", note_type in [NoteType.star, NoteType.break_star, NoteType.ex_star])
 
+    if note_type in [NoteType.tap, NoteType.break_tap, NoteType.ex_tap]:
+        modifier_string = "".join(
+            part for part, enabled in (("b", is_break), ("x", is_ex)) if enabled
+        )
         if counter > 0:
             result += "/"
-
         result += "{}{}".format(tap.position + 1, modifier_string)
     elif note_type in [NoteType.star, NoteType.break_star, NoteType.ex_star]:
         produced_slides = [slide for slide in slides if slide.position == tap.position]
         if len(produced_slides) > 0:
             return "", counter
 
-        # Adding $ would make a star note with no slides
-        if note_type == NoteType.break_star:
-            modifier_string = "b$"
-        elif note_type == NoteType.ex_star:
-            modifier_string = "x$"
-        else:
-            modifier_string = "$"
+        modifier_string = "".join(
+            part for part, enabled in (("b", is_break), ("x", is_ex), ("$", True)) if enabled or part == "$"
+        )
 
         if counter > 0:
             result += "/"
@@ -151,10 +145,12 @@ def handle_tap(tap: TapNote, slides: List[SlideNote], counter: int) -> Tuple[str
 def handle_hold(hold: HoldNote, counter: int, max_den: int = 1000) -> Tuple[str, int]:
     result = ""
     frac = Fraction(hold.duration).limit_denominator(max_den * 2)
-    if hold.note_type == NoteType.ex_hold:
-        modifier_string = "hx"
-    else:
-        modifier_string = "h"
+    is_break = getattr(hold, "is_break", False)
+    is_ex = getattr(hold, "is_ex", hold.note_type == NoteType.ex_hold)
+
+    modifier_string = "".join(
+        part for part, enabled in (("b", is_break), ("h", True), ("x", is_ex)) if enabled or part == "h"
+    )
 
     if counter > 0:
         result += "/"
@@ -196,8 +192,12 @@ def handle_touch_hold(
     if counter > 0:
         result += "/"
 
-    result += "{}{}[{}:{}]".format(
-        touch.region, modifier_string, frac.denominator, frac.numerator
+    result += "{}{}{}[{}:{}]".format(
+        touch.region,
+        touch.position + 1,
+        modifier_string,
+        frac.denominator,
+        frac.numerator,
     )
 
     counter += 1
@@ -213,38 +213,51 @@ def handle_slide(
     max_den: int = 1000,
 ) -> Tuple[str, int]:
     result = ""
-    stars = [star for star in taps if star.position == slide.position]
-    if counter > 0 and slide.position not in positions:
+    star_taps = [
+        star
+        for star in taps
+        if star.position == slide.position
+        and getattr(
+            star,
+            "is_star",
+            star.note_type in [NoteType.star, NoteType.break_star, NoteType.ex_star],
+        )
+    ]
+    position_modifiers = {position: "" for position in positions}
+
+    # CN-prefixed ma2 slides explicitly represent connected slide segments.
+    # Do not infer chaining from geometry: an unrelated slide may start where
+    # another slide ends at the same timestamp.
+    is_chained_segment = getattr(slide, "is_chain", False)
+
+    if counter > 0 and not is_chained_segment:
         result += "/"
 
-    if slide.position not in positions:
-        if len(stars) == 0:
-            # No star
-            modifier_string = "?"
-        elif stars[0].note_type == NoteType.break_star:
-            modifier_string = "b"
-        elif stars[0].note_type == NoteType.ex_star:
-            # Ex star
-            modifier_string = "x"
-        else:
-            modifier_string = ""
-    else:
-        # Regular star
-        modifier_string = ""
-
-    if slide.position in positions:
-        start_position = "*"
+    if is_chained_segment:
+        start_position = ""
+        modifier_string = "*"
+    elif len(star_taps) == 0:
+        start_position = str(slide.position + 1)
+        modifier_string = "?"
+        position_modifiers[slide.position] = modifier_string
     else:
         start_position = str(slide.position + 1)
+        is_break = getattr(
+            star_taps[0], "is_break", star_taps[0].note_type == NoteType.break_star
+        )
+        is_ex = getattr(star_taps[0], "is_ex", star_taps[0].note_type == NoteType.ex_star)
+        modifier_string = "".join(
+            part for part, enabled in (("b", is_break), ("x", is_ex)) if enabled
+        )
+        position_modifiers[slide.position] = modifier_string
 
     pattern = slide_to_pattern_str(slide)
+    
+    # Calculate duration and delay specs
     if slide.delay != 0.25:
         if slide.delay > 0.0025:
             scale = 0.25 / slide.delay
         else:
-            # There are no instant slides in Simai due to its
-            # "unique" way of representing slide delays
-            # So we just make a very fast slide
             scale = 100
 
         equivalent_bpm = round(bpm * scale * 10000.0) / 10000.0
@@ -270,6 +283,8 @@ def handle_slide(
             frac.numerator,
         )
 
+    # Keep the legacy position bookkeeping for callers that still pass a
+    # positions list, but do not use it to decide whether a segment is chained.
     if slide.position not in positions:
         positions.append(slide.position)
 

@@ -15,7 +15,7 @@ from .ma2note import (
     check_slide,
 )
 from .tools import parse_v1
-from maiconverter.event import NoteType
+from .ma2note import NoteType
 from maiconverter.tool import (
     second_to_measure,
     measure_to_second,
@@ -110,7 +110,7 @@ class MaiMa2:
             self.version = (values[1], values[2])
         elif line_type == "FES_MODE":
             self.fes_mode = values[1] == "1"
-        elif self.version[1] in ["1.02.00", "1.03.00"]:
+        elif self.version[1] in ["1.02.00", "1.03.00", "1.04.00", "1.05.00"]:
             parse_v1(self, values)
         else:
             raise ValueError(f"Unknown Ma2 version: {self.version}")
@@ -391,6 +391,7 @@ class MaiMa2:
         position: int,
         duration: float,
         is_ex: bool = False,
+        is_break: bool = False,
     ) -> MaiMa2:
         """Adds a hold note to the list of notes.
 
@@ -412,7 +413,13 @@ class MaiMa2:
             >>> ma2.add_hold(1, 2, 5)
             >>> ma2.add_hold(3, 6, 0.5, is_ex=True)
         """
-        hold_note = HoldNote(measure, position, duration, is_ex)
+        hold_note = HoldNote(
+            measure=measure,
+            position=position,
+            duration=duration,
+            is_ex=is_ex,
+            is_break=is_break,
+        )
 
         if is_ex:
             self.notes_stat["XHO"] += 1
@@ -465,6 +472,7 @@ class MaiMa2:
         pattern: int,
         delay: float = 0.25,
         slide_check: bool = True,
+        is_chain: bool = False,
     ) -> MaiMa2:
         """Adds a slide note to the list of notes.
 
@@ -501,6 +509,7 @@ class MaiMa2:
             pattern,
             duration,
             delay,
+            is_chain=is_chain,
         )
         self.notes_stat["SLD"] += 1
         self.notes.append(slide_note)

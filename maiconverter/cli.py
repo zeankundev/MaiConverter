@@ -339,7 +339,7 @@ def parse_arg():
 
 def main():
     args = parse_arg()
-    print(f"MaiConverter {maiconverter.__version__} by donmai")
+    print(f"MaiConverter {maiconverter.__version__} by donmai (modified by Right Hand Man (henry.chunimai))")
 
     if args.output is None:
         if os.path.isdir(args.path):

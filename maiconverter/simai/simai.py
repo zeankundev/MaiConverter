@@ -10,7 +10,7 @@ from .tools import (
     get_rest,
     parallel_parse_fragments,
 )
-from ..event import NoteType
+from ..event.note import NoteType
 from .simainote import TapNote, HoldNote, SlideNote, TouchTapNote, TouchHoldNote, BPM
 from .simai_parser import SimaiTransformer
 
@@ -76,11 +76,25 @@ class SimaiChart:
                     if "$" in modifier:
                         is_star = True
 
-                    if "`" in modifier:
-                        # Equivalent to one tick in ma2 with resolution of 384
+                    if "*" in modifier:
+                        # Chained slides should have the same offset
+                        pass
+                    elif "`" in modifier:
                         offset += 0.0027
                     else:
                         offset = 0
+
+                    is_chained = "*" in modifier
+
+                    if not (is_tapless or is_chained or event["start_button"] in star_positions):
+                        simai_chart.add_tap(
+                            measure=simai_chart._measure + offset,
+                            position=event["start_button"],
+                            is_break=is_break,
+                            is_star=True,
+                            is_ex=is_ex,
+                        )
+                        star_positions.append(event["start_button"])
 
                     simai_chart.add_tap(
                         measure=simai_chart._measure + offset,
@@ -110,6 +124,7 @@ class SimaiChart:
                 elif event_type == "slide":
                     is_break, is_ex, is_tapless = False, False, False
                     modifier = event["modifier"]
+                    is_chain = "*" in modifier
                     if "b" in modifier:
                         is_break = True
                     if "x" in modifier:
@@ -121,8 +136,9 @@ class SimaiChart:
                         # $ is a remnant of 2simai, it is equivalent to ?
                         is_tapless = True
 
-                    if "*" in modifier:
-                        # Chained slides should have the same offset
+                    if is_chain:
+                        # Chained slides share the previous slide's star; the
+                        # connection itself does not create a new star note.
                         pass
                     elif "`" in modifier:
                         # Equivalent to one tick in ma2 with resolution of 384
@@ -130,7 +146,7 @@ class SimaiChart:
                     else:
                         offset = 0
 
-                    if not (is_tapless or event["start_button"] in star_positions):
+                    if not (is_tapless or is_chain or event["start_button"] in star_positions):
                         simai_chart.add_tap(
                             measure=simai_chart._measure + offset,
                             position=event["start_button"],
@@ -158,6 +174,7 @@ class SimaiChart:
                         pattern=event["pattern"],
                         delay=delay,
                         reflect_position=event["reflect_position"],
+                        is_chain=is_chain,
                     )
                 elif event_type == "touch_tap":
                     is_firework = False
@@ -294,6 +311,7 @@ class SimaiChart:
         position: int,
         duration: float,
         is_ex: bool = False,
+        is_break: bool = False,
     ) -> SimaiChart:
         """Adds a hold note to the list of notes.
 
@@ -312,7 +330,13 @@ class SimaiChart:
             >>> simai.add_hold(1, 2, 5)
             >>> simai.add_hold(3, 6, 0.5, is_ex=True)
         """
-        hold_note = HoldNote(measure, position, duration, is_ex)
+        hold_note = HoldNote(
+            measure=measure,
+            position=position,
+            duration=duration,
+            is_ex=is_ex,
+            is_break=is_break,
+        )
         self.notes.append(hold_note)
 
         return self
@@ -354,6 +378,7 @@ class SimaiChart:
         pattern: str,
         delay: float = 0.25,
         reflect_position: Optional[int] = None,
+        is_chain: bool = False,
     ) -> SimaiChart:
         """Adds both a slide note to the list of notes.
 
@@ -386,6 +411,7 @@ class SimaiChart:
             pattern,
             delay,
             reflect_position,
+            is_chain,
         )
         self.notes.append(slide_note)
 

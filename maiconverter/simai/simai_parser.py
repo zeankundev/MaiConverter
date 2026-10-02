@@ -257,7 +257,7 @@ class FragmentTransformer(Transformer):
 
         if len(chained_slides) != 0:
             slides += process_chained_slides(
-                start, duration, equivalent_bpm, modifier + "*", chained_slides
+                end, duration, equivalent_bpm, modifier + "*", chained_slides
             )
 
         if len(slides) > 0:
@@ -400,8 +400,9 @@ def process_chained_slides(
     chained_slides: List[dict],
 ):
     complete_slides = []
+    current_start = start_button
     for slide in chained_slides:
-        if start_button == -1 or slide["reflect"] == -1 or slide["end"] == -1:
+        if current_start == -1 or slide["reflect"] == -1 or slide["end"] == -1:
             continue
 
         duration = duration if slide["duration"] is None else slide["duration"]
@@ -413,7 +414,7 @@ def process_chained_slides(
 
         note_dict = {
             "type": "slide",
-            "start_button": start_button,
+            "start_button": current_start,
             "modifier": slide_modifier,
             "pattern": slide["pattern"],
             "reflect_position": slide["reflect"],
@@ -422,6 +423,8 @@ def process_chained_slides(
             "equivalent_bpm": equivalent_bpm,
         }
         complete_slides.append(note_dict)
+        # Update current_start so the next segment attaches to this segment's end position
+        current_start = slide["end"]
 
     return complete_slides
 

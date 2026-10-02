@@ -1,6 +1,7 @@
 from typing import Optional, Tuple
 
-from ..event import Event, EventType, SimaiNote, NoteType
+from ..event import Event, EventType
+from ..event.note import SimaiNote, NoteType
 from ..tool import slide_distance, slide_is_cw
 
 
@@ -58,10 +59,19 @@ class TapNote(SimaiNote):
         else:
             super().__init__(measure, position, NoteType.tap)
 
+        self.is_break = is_break
+        self.is_ex = is_ex
+        self.is_star = is_star
+
 
 class HoldNote(SimaiNote):
     def __init__(
-        self, measure: float, position: int, duration: float, is_ex: bool = False
+        self,
+        measure: float,
+        position: int,
+        duration: float,
+        is_ex: bool = False,
+        is_break: bool = False,
     ) -> None:
         if duration < 0:
             raise ValueError(f"Hold duration is negative: {duration}")
@@ -73,6 +83,8 @@ class HoldNote(SimaiNote):
         else:
             super().__init__(measure, position, NoteType.hold)
 
+        self.is_ex = is_ex
+        self.is_break = is_break
         self.duration = duration
 
 
@@ -86,6 +98,7 @@ class SlideNote(SimaiNote):
         pattern: str,
         delay: float = 0.25,
         reflect_position: Optional[int] = None,
+        is_chain: bool = False,
     ) -> None:
         """Produces a simai slide note.
 
@@ -127,6 +140,7 @@ class SlideNote(SimaiNote):
         self.pattern = pattern
         self.delay = delay
         self.reflect_position = reflect_position
+        self.is_chain = is_chain
 
 
 class TouchTapNote(SimaiNote):
