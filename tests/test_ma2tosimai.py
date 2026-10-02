@@ -1,6 +1,7 @@
-from maiconverter.maima2 import MaiMa2
-from maiconverter.converter import ma2_to_simai
+from maiconverter.maima2 import MaiMa2, SlideNote as Ma2SlideNote
+from maiconverter.converter import ma2_to_simai, simai_to_ma2
 from maiconverter.simai import TouchHoldNote, pattern_from_int
+from maiconverter.simai.simai import SimaiChart
 from maiconverter.simai.simai_parser import parse_fragment
 from maiconverter.simai.tools import convert_to_fragment
 
@@ -84,8 +85,22 @@ def test_no_star_chained_slide_keeps_tapless_path():
     ma2.set_bpm(0.0, 120)
     ma2.add_tap(1.0, 0)
     ma2.add_slide(1.0, 0, 2, 1.0, 1)
-    ma2.add_slide(1.0, 0, 3, 1.0, 1)
+    ma2.add_slide(1.0, 2, 4, 1.0, 1, is_chain=True)
 
     fragment = ma2_to_simai(ma2).export()
 
-    assert "1?-3[1:1]*-4[1:1]" in fragment
+    assert "1?-3[1:1]*-5[1:1]" in fragment
+
+
+def test_chain_flag_is_preserved_in_simai_to_ma2_conversion():
+    simai = SimaiChart()
+    simai.set_bpm(1.0, 120)
+    simai.add_slide(1.0, 0, 2, 1.0, "-")
+    simai.add_slide(1.0, 2, 4, 1.0, "-", is_chain=True)
+
+    ma2 = simai_to_ma2(simai)
+    slides = [note for note in ma2.notes if isinstance(note, Ma2SlideNote)]
+
+    assert len(slides) == 2
+    assert slides[0].is_chain is False
+    assert slides[1].is_chain is True

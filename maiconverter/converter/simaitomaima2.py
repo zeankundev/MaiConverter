@@ -66,6 +66,7 @@ def convert_notes(ma2: MaiMa2, simai_notes: List[SimaiNote]) -> None:
             # Ma2 slide durations does not include the delay
             # like in simai
             pattern = pattern_to_int(simai_note)
+            is_chain = getattr(simai_note, "is_chain", False)
             ma2.add_slide(
                 measure=simai_note.measure,
                 start_position=simai_note.position,
@@ -73,6 +74,7 @@ def convert_notes(ma2: MaiMa2, simai_notes: List[SimaiNote]) -> None:
                 duration=simai_note.duration,
                 pattern=pattern,
                 delay=simai_note.delay,
+                is_chain=is_chain,
             )
         elif isinstance(simai_note, TouchTapNote):
             ma2.add_touch_tap(
