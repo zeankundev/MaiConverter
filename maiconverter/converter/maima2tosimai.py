@@ -69,6 +69,7 @@ def convert_notes(simai_chart: SimaiChart, ma2_notes: Sequence[MaiNote]) -> None
             pattern = pattern_from_int(
                 ma2_note.pattern, ma2_note.position, ma2_note.end_position
             )
+            is_chain = getattr(ma2_note, "is_chain", False)
             simai_chart.add_slide(
                 measure=ma2_note.measure,
                 start_position=ma2_note.position,
@@ -77,6 +78,7 @@ def convert_notes(simai_chart: SimaiChart, ma2_notes: Sequence[MaiNote]) -> None
                 pattern=pattern[0],
                 delay=ma2_note.delay,
                 reflect_position=pattern[1],
+                is_chain=is_chain,
             )
         elif isinstance(ma2_note, TouchTapNote):
             simai_chart.add_touch_tap(
