@@ -670,10 +670,19 @@ class SimaiChart:
             for hold_slide in hold_slides:
                 # Get hold and slide end measure and compare with last_measure
                 if hold_slide.note_type == NoteType.complete_slide:
-                    last_measure = max(
-                        current_measure + hold_slide.delay + hold_slide.duration,
-                        last_measure,
-                    )
+                    chain_head = getattr(hold_slide, "chain_head", None)
+                    if chain_head is not None:
+                        slide_end = (
+                            current_measure
+                            + chain_head.delay
+                            + hold_slide.chain_rel_start
+                            + hold_slide.duration
+                        )
+                    else:
+                        slide_end = (
+                            current_measure + hold_slide.delay + hold_slide.duration
+                        )
+                    last_measure = max(slide_end, last_measure)
                 else:
                     last_measure = max(
                         current_measure + hold_slide.duration, last_measure

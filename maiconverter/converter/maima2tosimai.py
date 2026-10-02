@@ -6,6 +6,7 @@ from ..simai import (
     HoldNote as SimaiHoldNote,
     TouchHoldNote as SimaiTouchHoldNote,
     SlideNote as SimaiSlideNote,
+    link_chained_slides,
 )
 from ..maima2 import (
     MaiMa2,
@@ -28,6 +29,9 @@ def ma2_to_simai(ma2: MaiMa2) -> SimaiChart:
         simai_chart.set_bpm(measure, bpm.bpm)
 
     convert_notes(simai_chart, ma2.notes)
+    link_chained_slides(
+        [n for n in simai_chart.notes if isinstance(n, SimaiSlideNote)]
+    )
 
     if len(simai_chart.bpms) != 1:
         fix_durations(simai_chart)
@@ -138,12 +142,17 @@ def fix_durations(simai: SimaiChart):
 
     for note in simai.notes:
         if isinstance(note, (SimaiHoldNote, SimaiTouchHoldNote, SimaiSlideNote)):
-            bpms = bpm_changes(note.measure, note.duration)
+            start = note.measure
+            if isinstance(note, SimaiSlideNote) and note.chain_head is not None:
+                # Connected segments begin after the head's delay and after
+                # the segments before them.
+                start += note.chain_head.delay + note.chain_rel_start
+            bpms = bpm_changes(start, note.duration)
             if len(bpms) != 0:
                 note.duration = compensate_duration(
-                    note.measure, note.duration, simai.get_bpm(note.measure), bpms
+                    start, note.duration, simai.get_bpm(start), bpms
                 )
-        if isinstance(note, SimaiSlideNote):
+        if isinstance(note, SimaiSlideNote) and note.chain_head is None:
             bpms = bpm_changes(note.measure, note.delay)
             if len(bpms) != 0:
                 note.delay = compensate_duration(

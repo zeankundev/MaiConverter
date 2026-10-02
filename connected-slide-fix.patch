@@ -1,0 +1,404 @@
+diff --git a/maiconverter/converter/maima2tosimai.py b/maiconverter/converter/maima2tosimai.py
+index 1585c9a..601530c 100644
+--- a/maiconverter/converter/maima2tosimai.py
++++ b/maiconverter/converter/maima2tosimai.py
+@@ -6,6 +6,7 @@ from ..simai import (
+     HoldNote as SimaiHoldNote,
+     TouchHoldNote as SimaiTouchHoldNote,
+     SlideNote as SimaiSlideNote,
++    link_chained_slides,
+ )
+ from ..maima2 import (
+     MaiMa2,
+@@ -28,6 +29,9 @@ def ma2_to_simai(ma2: MaiMa2) -> SimaiChart:
+         simai_chart.set_bpm(measure, bpm.bpm)
+ 
+     convert_notes(simai_chart, ma2.notes)
++    link_chained_slides(
++        [n for n in simai_chart.notes if isinstance(n, SimaiSlideNote)]
++    )
+ 
+     if len(simai_chart.bpms) != 1:
+         fix_durations(simai_chart)
+@@ -138,12 +142,17 @@ def fix_durations(simai: SimaiChart):
+ 
+     for note in simai.notes:
+         if isinstance(note, (SimaiHoldNote, SimaiTouchHoldNote, SimaiSlideNote)):
+-            bpms = bpm_changes(note.measure, note.duration)
++            start = note.measure
++            if isinstance(note, SimaiSlideNote) and note.chain_head is not None:
++                # Connected segments begin after the head's delay and after
++                # the segments before them.
++                start += note.chain_head.delay + note.chain_rel_start
++            bpms = bpm_changes(start, note.duration)
+             if len(bpms) != 0:
+                 note.duration = compensate_duration(
+-                    note.measure, note.duration, simai.get_bpm(note.measure), bpms
++                    start, note.duration, simai.get_bpm(start), bpms
+                 )
+-        if isinstance(note, SimaiSlideNote):
++        if isinstance(note, SimaiSlideNote) and note.chain_head is None:
+             bpms = bpm_changes(note.measure, note.delay)
+             if len(bpms) != 0:
+                 note.delay = compensate_duration(
+diff --git a/maiconverter/simai/simai.py b/maiconverter/simai/simai.py
+index c9f500b..2e452cb 100644
+--- a/maiconverter/simai/simai.py
++++ b/maiconverter/simai/simai.py
+@@ -670,10 +670,19 @@ class SimaiChart:
+             for hold_slide in hold_slides:
+                 # Get hold and slide end measure and compare with last_measure
+                 if hold_slide.note_type == NoteType.complete_slide:
+-                    last_measure = max(
+-                        current_measure + hold_slide.delay + hold_slide.duration,
+-                        last_measure,
+-                    )
++                    chain_head = getattr(hold_slide, "chain_head", None)
++                    if chain_head is not None:
++                        slide_end = (
++                            current_measure
++                            + chain_head.delay
++                            + hold_slide.chain_rel_start
++                            + hold_slide.duration
++                        )
++                    else:
++                        slide_end = (
++                            current_measure + hold_slide.delay + hold_slide.duration
++                        )
++                    last_measure = max(slide_end, last_measure)
+                 else:
+                     last_measure = max(
+                         current_measure + hold_slide.duration, last_measure
+diff --git a/maiconverter/simai/simai_fragment.lark b/maiconverter/simai/simai_fragment.lark
+index 2949c03..9a170f7 100644
+--- a/maiconverter/simai/simai_fragment.lark
++++ b/maiconverter/simai/simai_fragment.lark
+@@ -27,7 +27,7 @@ tap_hold_note: /[0-8][hbex$]*/ duration?
+ 
+ slide_beg: /[0-8][b@x?$!]*([-^<>szvw]|p{1,2}|q{1,2}|V[0-8])[0-8]/
+ slide_note: slide_beg duration chained_slide_note*
+-chained_slide_note: "*" /[b@ex?$!]*([-^<>szvw]|p{1,2}|q{1,2}|V[0-8])[0-8]/ duration?
++chained_slide_note: "*"? /[b@ex?$!]*([-^<>szvw]|p{1,2}|q{1,2}|V[0-8])[0-8]/ duration?
+ 
+ touch_tap_hold_note: /((C[012]?)|(B[0-8])|(E[0-8])|(A[0-8])|(D[0-8]))[hfe]*/ duration?
+ 
+diff --git a/maiconverter/simai/simainote.py b/maiconverter/simai/simainote.py
+index a44c4cf..19ddea4 100644
+--- a/maiconverter/simai/simainote.py
++++ b/maiconverter/simai/simainote.py
+@@ -141,6 +141,15 @@ class SlideNote(SimaiNote):
+         self.delay = delay
+         self.reflect_position = reflect_position
+         self.is_chain = is_chain
++        # Connected-slide bookkeeping. Filled in by link_chained_slides().
++        # chain_head: first segment of the connected slide (None if this
++        #   note is a head or a standalone slide).
++        # chain_next: the segment that continues from this one.
++        # chain_rel_start: time, in measures, between the head finishing its
++        #   delay and this segment starting to move.
++        self.chain_head: Optional["SlideNote"] = None
++        self.chain_next: Optional["SlideNote"] = None
++        self.chain_rel_start: float = 0.0
+ 
+ 
+ class TouchTapNote(SimaiNote):
+@@ -183,6 +192,63 @@ class BPM(Event):
+         self.bpm = bpm
+ 
+ 
++def link_chained_slides(slides, tolerance: float = 0.002) -> None:
++    """Attach every ma2 ``CN`` segment to the slide it continues.
++
++    A connected slide is ONE slide in simai: ``1-3[4:1]-5[4:1]``. The ``*``
++    operator is a different thing (a second slide from the same start button)
++    and makes the editor spawn an extra star, so segments must be merged
++    into their head instead of being exported as separate notes.
++
++    ma2 files are not consistent on how a CN line is timed (own measure with
++    zero delay, or head measure with the delay as an offset), so a segment is
++    matched to the open tail that ends on its start button and either ends
++    exactly when the segment begins, or starts at the same measure.
++    """
++    heads = [s for s in slides if not s.is_chain]
++    chains = [s for s in slides if s.is_chain]
++    chains.sort(key=lambda s: (s.measure, s.measure + s.delay))
++    open_tails = list(heads)
++
++    def tail_end(note) -> float:
++        head = note.chain_head or note
++        return head.measure + head.delay + note.chain_rel_start + note.duration
++
++    for seg in chains:
++        seg_start = seg.measure + seg.delay
++        best = None
++        best_score = None
++        for tail in open_tails:
++            if tail.end_position != seg.position or tail.chain_next is not None:
++                continue
++            head = tail.chain_head or tail
++            if abs(tail_end(tail) - seg_start) <= tolerance:
++                score = 0
++            elif abs(head.measure - seg.measure) <= tolerance:
++                score = 1
++            else:
++                continue
++            if best_score is None or score < best_score:
++                best, best_score = tail, score
++
++        if best is None:
++            # Orphan segment: keep it as a normal slide so it is not lost.
++            print(
++                f"Warning: chained slide at measure {seg.measure} "
++                f"(button {seg.position + 1}) has no parent slide"
++            )
++            seg.is_chain = False
++            open_tails.append(seg)
++            continue
++
++        head = best.chain_head or best
++        seg.chain_head = head
++        seg.chain_rel_start = best.chain_rel_start + best.duration
++        best.chain_next = seg
++        seg.measure = head.measure
++        open_tails.append(seg)
++
++
+ def slide_to_pattern_str(slide_note: SlideNote) -> str:
+     pattern = slide_note.pattern
+     if pattern != "V":
+diff --git a/maiconverter/simai/tools.py b/maiconverter/simai/tools.py
+index f6bc66f..4c5ae71 100644
+--- a/maiconverter/simai/tools.py
++++ b/maiconverter/simai/tools.py
+@@ -213,50 +213,60 @@ def handle_slide(
+     max_den: int = 1000,
+ ) -> Tuple[str, int]:
+     result = ""
+-    star_taps = [
+-        star
+-        for star in taps
+-        if star.position == slide.position
+-        and getattr(
+-            star,
+-            "is_star",
+-            star.note_type in [NoteType.star, NoteType.break_star, NoteType.ex_star],
+-        )
+-    ]
+-    position_modifiers = {position: "" for position in positions}
+-
+-    # CN-prefixed ma2 slides explicitly represent connected slide segments.
+-    # Do not infer chaining from geometry: an unrelated slide may start where
+-    # another slide ends at the same timestamp.
+-    is_chained_segment = getattr(slide, "is_chain", False)
+-
+-    if counter > 0 and not is_chained_segment:
+-        result += "/"
++    chain_head = getattr(slide, "chain_head", None)
++    is_chained_segment = chain_head is not None
+ 
+     if is_chained_segment:
++        # A connected slide is a single simai slide: "1-3[4:1]-5[4:1]".
++        # Segments are glued directly to the previous one: no "/", no "*"
++        # (a "*" would make a separate slide with its own star).
+         start_position = ""
+-        modifier_string = "*"
+-    elif len(star_taps) == 0:
+-        start_position = str(slide.position + 1)
+-        modifier_string = "?"
+-        position_modifiers[slide.position] = modifier_string
++        modifier_string = ""
++        timing = chain_head
+     else:
+-        start_position = str(slide.position + 1)
+-        is_break = getattr(
+-            star_taps[0], "is_break", star_taps[0].note_type == NoteType.break_star
+-        )
+-        is_ex = getattr(star_taps[0], "is_ex", star_taps[0].note_type == NoteType.ex_star)
+-        modifier_string = "".join(
+-            part for part, enabled in (("b", is_break), ("x", is_ex)) if enabled
+-        )
+-        position_modifiers[slide.position] = modifier_string
++        timing = slide
++        star_taps = [
++            star
++            for star in taps
++            if star.position == slide.position
++            and getattr(
++                star,
++                "is_star",
++                star.note_type
++                in [NoteType.star, NoteType.break_star, NoteType.ex_star],
++            )
++        ]
++        position_modifiers = {position: "" for position in positions}
++
++        if counter > 0:
++            result += "/"
++
++        if len(star_taps) == 0:
++            start_position = str(slide.position + 1)
++            modifier_string = "?"
++            position_modifiers[slide.position] = modifier_string
++        else:
++            start_position = str(slide.position + 1)
++            is_break = getattr(
++                star_taps[0],
++                "is_break",
++                star_taps[0].note_type == NoteType.break_star,
++            )
++            is_ex = getattr(
++                star_taps[0], "is_ex", star_taps[0].note_type == NoteType.ex_star
++            )
++            modifier_string = "".join(
++                part for part, enabled in (("b", is_break), ("x", is_ex)) if enabled
++            )
++            position_modifiers[slide.position] = modifier_string
+ 
+     pattern = slide_to_pattern_str(slide)
+     
+     # Calculate duration and delay specs
+-    if slide.delay != 0.25:
+-        if slide.delay > 0.0025:
+-            scale = 0.25 / slide.delay
++    # Segments of a connected slide share the head's delay/BPM scaling.
++    if timing.delay != 0.25:
++        if timing.delay > 0.0025:
++            scale = 0.25 / timing.delay
+         else:
+             scale = 100
+ 
+@@ -283,8 +293,10 @@ def handle_slide(
+             frac.numerator,
+         )
+ 
+-    # Keep the legacy position bookkeeping for callers that still pass a
+-    # positions list, but do not use it to decide whether a segment is chained.
++    if is_chained_segment:
++        # Same slide, so the "/" counter does not advance.
++        return result, counter
++
+     if slide.position not in positions:
+         positions.append(slide.position)
+ 
+@@ -304,7 +316,13 @@ def convert_to_fragment(
+     hold_notes = [note for note in events if isinstance(note, HoldNote)]
+     touch_tap_notes = [note for note in events if isinstance(note, TouchTapNote)]
+     touch_hold_notes = [note for note in events if isinstance(note, TouchHoldNote)]
+-    slide_notes = [note for note in events if isinstance(note, SlideNote)]
++    # Connected-slide segments are written right after their head, so only
++    # heads take part in ordering and star matching.
++    slide_notes = [
++        note
++        for note in events
++        if isinstance(note, SlideNote) and getattr(note, "chain_head", None) is None
++    ]
+     slide_notes.sort(
+         key=lambda sn: (
+             sn.position,
+@@ -349,6 +367,13 @@ def convert_to_fragment(
+         fragment += result[0]
+         counter = result[1]
+ 
++        segment = getattr(slide_note, "chain_next", None)
++        while segment is not None:
++            fragment += handle_slide(
++                segment, tap_notes, positions, current_bpm, counter, max_den=max_den
++            )[0]
++            segment = segment.chain_next
++
+     return fragment
+ 
+ 
+diff --git a/tests/test_ma2tosimai.py b/tests/test_ma2tosimai.py
+index 57571fa..56b19a3 100644
+--- a/tests/test_ma2tosimai.py
++++ b/tests/test_ma2tosimai.py
+@@ -89,7 +89,8 @@ def test_no_star_chained_slide_keeps_tapless_path():
+ 
+     fragment = ma2_to_simai(ma2).export()
+ 
+-    assert "1?-3[1:1]*-5[1:1]" in fragment
++    assert "1?-3[1:1]-5[1:1]" in fragment
++    assert "*" not in fragment
+ 
+ 
+ def test_chain_flag_is_preserved_in_simai_to_ma2_conversion():
+@@ -104,3 +105,78 @@ def test_chain_flag_is_preserved_in_simai_to_ma2_conversion():
+     assert len(slides) == 2
+     assert slides[0].is_chain is False
+     assert slides[1].is_chain is True
++
++
++def _fragment(ma2):
++    return ma2_to_simai(ma2).export()
++
++
++def test_connected_slide_is_a_single_slide_with_star():
++    ma2 = MaiMa2()
++    ma2.set_bpm(0.0, 120)
++    ma2.add_tap(1.0, 0, is_star=True)
++    ma2.add_slide(1.0, 0, 2, 1.0, 1)
++    ma2.add_slide(1.0, 2, 4, 1.0, 1, is_chain=True)
++
++    fragment = _fragment(ma2)
++
++    assert "1-3[1:1]-5[1:1]" in fragment
++    assert "*" not in fragment and "/" not in fragment
++
++
++def test_connected_slide_segment_timed_with_cumulative_delay():
++    # CN line stored with the head's measure and delay = offset to its start
++    ma2 = MaiMa2()
++    ma2.set_bpm(0.0, 120)
++    ma2.add_tap(1.0, 0, is_star=True)
++    ma2.add_slide(1.0, 0, 2, 1.0, 1, delay=0.25)
++    ma2.add_slide(1.0, 2, 4, 1.0, 1, delay=1.25, is_chain=True)
++
++    assert "1-3[1:1]-5[1:1]" in _fragment(ma2)
++
++
++def test_connected_slide_segment_stored_at_later_measure():
++    ma2 = MaiMa2()
++    ma2.set_bpm(0.0, 120)
++    ma2.add_tap(1.0, 0, is_star=True)
++    ma2.add_slide(1.0, 0, 2, 1.0, 1, delay=0.25)
++    ma2.add_slide(2.25, 2, 4, 1.0, 1, delay=0.0, is_chain=True)
++
++    fragment = _fragment(ma2)
++    assert "1-3[1:1]-5[1:1]" in fragment
++    assert "*" not in fragment
++
++
++def test_unrelated_slide_sharing_start_is_not_merged():
++    ma2 = MaiMa2()
++    ma2.set_bpm(0.0, 120)
++    ma2.add_tap(1.0, 0, is_star=True)
++    ma2.add_tap(1.0, 2, is_star=True)
++    ma2.add_slide(1.0, 0, 2, 1.0, 1)
++    ma2.add_slide(1.0, 2, 4, 1.0, 1)
++
++    assert "/" in _fragment(ma2)
++
++
++def test_three_segment_chain_and_trailing_rest():
++    ma2 = MaiMa2()
++    ma2.set_bpm(0.0, 120)
++    ma2.add_tap(1.0, 0, is_star=True)
++    ma2.add_slide(1.0, 0, 2, 0.5, 1)
++    ma2.add_slide(1.0, 2, 4, 0.5, 1, is_chain=True)
++    ma2.add_slide(1.0, 4, 6, 0.5, 1, is_chain=True)
++
++    simai = ma2_to_simai(ma2)
++    fragment = simai.export()
++    assert "1-3[2:1]-5[2:1]-7[2:1]" in fragment
++    # whole chain length (0.25 delay + 1.5) must be covered by rests
++    assert fragment.count(",") >= 2
++
++
++def test_exported_connected_slide_parses_back_as_chain():
++    from maiconverter.simai.simai_parser import parse_fragment
++
++    notes = parse_fragment("1-3[4:1]-5[4:1]")
++    assert [n["pattern"] for n in notes] == ["-", "-"]
++    assert [(n["start_button"], n["end_button"]) for n in notes] == [(0, 2), (2, 4)]
++    assert notes[1]["modifier"].endswith("*")

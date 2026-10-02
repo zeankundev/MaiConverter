@@ -213,50 +213,60 @@ def handle_slide(
     max_den: int = 1000,
 ) -> Tuple[str, int]:
     result = ""
-    star_taps = [
-        star
-        for star in taps
-        if star.position == slide.position
-        and getattr(
-            star,
-            "is_star",
-            star.note_type in [NoteType.star, NoteType.break_star, NoteType.ex_star],
-        )
-    ]
-    position_modifiers = {position: "" for position in positions}
-
-    # CN-prefixed ma2 slides explicitly represent connected slide segments.
-    # Do not infer chaining from geometry: an unrelated slide may start where
-    # another slide ends at the same timestamp.
-    is_chained_segment = getattr(slide, "is_chain", False)
-
-    if counter > 0 and not is_chained_segment:
-        result += "/"
+    chain_head = getattr(slide, "chain_head", None)
+    is_chained_segment = chain_head is not None
 
     if is_chained_segment:
+        # A connected slide is a single simai slide: "1-3[4:1]-5[4:1]".
+        # Segments are glued directly to the previous one: no "/", no "*"
+        # (a "*" would make a separate slide with its own star).
         start_position = ""
-        modifier_string = "*"
-    elif len(star_taps) == 0:
-        start_position = str(slide.position + 1)
-        modifier_string = "?"
-        position_modifiers[slide.position] = modifier_string
+        modifier_string = ""
+        timing = chain_head
     else:
-        start_position = str(slide.position + 1)
-        is_break = getattr(
-            star_taps[0], "is_break", star_taps[0].note_type == NoteType.break_star
-        )
-        is_ex = getattr(star_taps[0], "is_ex", star_taps[0].note_type == NoteType.ex_star)
-        modifier_string = "".join(
-            part for part, enabled in (("b", is_break), ("x", is_ex)) if enabled
-        )
-        position_modifiers[slide.position] = modifier_string
+        timing = slide
+        star_taps = [
+            star
+            for star in taps
+            if star.position == slide.position
+            and getattr(
+                star,
+                "is_star",
+                star.note_type
+                in [NoteType.star, NoteType.break_star, NoteType.ex_star],
+            )
+        ]
+        position_modifiers = {position: "" for position in positions}
+
+        if counter > 0:
+            result += "/"
+
+        if len(star_taps) == 0:
+            start_position = str(slide.position + 1)
+            modifier_string = "?"
+            position_modifiers[slide.position] = modifier_string
+        else:
+            start_position = str(slide.position + 1)
+            is_break = getattr(
+                star_taps[0],
+                "is_break",
+                star_taps[0].note_type == NoteType.break_star,
+            )
+            is_ex = getattr(
+                star_taps[0], "is_ex", star_taps[0].note_type == NoteType.ex_star
+            )
+            modifier_string = "".join(
+                part for part, enabled in (("b", is_break), ("x", is_ex)) if enabled
+            )
+            position_modifiers[slide.position] = modifier_string
 
     pattern = slide_to_pattern_str(slide)
     
     # Calculate duration and delay specs
-    if slide.delay != 0.25:
-        if slide.delay > 0.0025:
-            scale = 0.25 / slide.delay
+    # Segments of a connected slide share the head's delay/BPM scaling.
+    if timing.delay != 0.25:
+        if timing.delay > 0.0025:
+            scale = 0.25 / timing.delay
         else:
             scale = 100
 
@@ -283,8 +293,10 @@ def handle_slide(
             frac.numerator,
         )
 
-    # Keep the legacy position bookkeeping for callers that still pass a
-    # positions list, but do not use it to decide whether a segment is chained.
+    if is_chained_segment:
+        # Same slide, so the "/" counter does not advance.
+        return result, counter
+
     if slide.position not in positions:
         positions.append(slide.position)
 
@@ -304,7 +316,13 @@ def convert_to_fragment(
     hold_notes = [note for note in events if isinstance(note, HoldNote)]
     touch_tap_notes = [note for note in events if isinstance(note, TouchTapNote)]
     touch_hold_notes = [note for note in events if isinstance(note, TouchHoldNote)]
-    slide_notes = [note for note in events if isinstance(note, SlideNote)]
+    # Connected-slide segments are written right after their head, so only
+    # heads take part in ordering and star matching.
+    slide_notes = [
+        note
+        for note in events
+        if isinstance(note, SlideNote) and getattr(note, "chain_head", None) is None
+    ]
     slide_notes.sort(
         key=lambda sn: (
             sn.position,
@@ -348,6 +366,13 @@ def convert_to_fragment(
         )
         fragment += result[0]
         counter = result[1]
+
+        segment = getattr(slide_note, "chain_next", None)
+        while segment is not None:
+            fragment += handle_slide(
+                segment, tap_notes, positions, current_bpm, counter, max_den=max_den
+            )[0]
+            segment = segment.chain_next
 
     return fragment
 

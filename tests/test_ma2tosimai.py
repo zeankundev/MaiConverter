@@ -89,7 +89,8 @@ def test_no_star_chained_slide_keeps_tapless_path():
 
     fragment = ma2_to_simai(ma2).export()
 
-    assert "1?-3[1:1]*-5[1:1]" in fragment
+    assert "1?-3[1:1]-5[1:1]" in fragment
+    assert "*" not in fragment
 
 
 def test_chain_flag_is_preserved_in_simai_to_ma2_conversion():
@@ -104,3 +105,78 @@ def test_chain_flag_is_preserved_in_simai_to_ma2_conversion():
     assert len(slides) == 2
     assert slides[0].is_chain is False
     assert slides[1].is_chain is True
+
+
+def _fragment(ma2):
+    return ma2_to_simai(ma2).export()
+
+
+def test_connected_slide_is_a_single_slide_with_star():
+    ma2 = MaiMa2()
+    ma2.set_bpm(0.0, 120)
+    ma2.add_tap(1.0, 0, is_star=True)
+    ma2.add_slide(1.0, 0, 2, 1.0, 1)
+    ma2.add_slide(1.0, 2, 4, 1.0, 1, is_chain=True)
+
+    fragment = _fragment(ma2)
+
+    assert "1-3[1:1]-5[1:1]" in fragment
+    assert "*" not in fragment and "/" not in fragment
+
+
+def test_connected_slide_segment_timed_with_cumulative_delay():
+    # CN line stored with the head's measure and delay = offset to its start
+    ma2 = MaiMa2()
+    ma2.set_bpm(0.0, 120)
+    ma2.add_tap(1.0, 0, is_star=True)
+    ma2.add_slide(1.0, 0, 2, 1.0, 1, delay=0.25)
+    ma2.add_slide(1.0, 2, 4, 1.0, 1, delay=1.25, is_chain=True)
+
+    assert "1-3[1:1]-5[1:1]" in _fragment(ma2)
+
+
+def test_connected_slide_segment_stored_at_later_measure():
+    ma2 = MaiMa2()
+    ma2.set_bpm(0.0, 120)
+    ma2.add_tap(1.0, 0, is_star=True)
+    ma2.add_slide(1.0, 0, 2, 1.0, 1, delay=0.25)
+    ma2.add_slide(2.25, 2, 4, 1.0, 1, delay=0.0, is_chain=True)
+
+    fragment = _fragment(ma2)
+    assert "1-3[1:1]-5[1:1]" in fragment
+    assert "*" not in fragment
+
+
+def test_unrelated_slide_sharing_start_is_not_merged():
+    ma2 = MaiMa2()
+    ma2.set_bpm(0.0, 120)
+    ma2.add_tap(1.0, 0, is_star=True)
+    ma2.add_tap(1.0, 2, is_star=True)
+    ma2.add_slide(1.0, 0, 2, 1.0, 1)
+    ma2.add_slide(1.0, 2, 4, 1.0, 1)
+
+    assert "/" in _fragment(ma2)
+
+
+def test_three_segment_chain_and_trailing_rest():
+    ma2 = MaiMa2()
+    ma2.set_bpm(0.0, 120)
+    ma2.add_tap(1.0, 0, is_star=True)
+    ma2.add_slide(1.0, 0, 2, 0.5, 1)
+    ma2.add_slide(1.0, 2, 4, 0.5, 1, is_chain=True)
+    ma2.add_slide(1.0, 4, 6, 0.5, 1, is_chain=True)
+
+    simai = ma2_to_simai(ma2)
+    fragment = simai.export()
+    assert "1-3[2:1]-5[2:1]-7[2:1]" in fragment
+    # whole chain length (0.25 delay + 1.5) must be covered by rests
+    assert fragment.count(",") >= 2
+
+
+def test_exported_connected_slide_parses_back_as_chain():
+    from maiconverter.simai.simai_parser import parse_fragment
+
+    notes = parse_fragment("1-3[4:1]-5[4:1]")
+    assert [n["pattern"] for n in notes] == ["-", "-"]
+    assert [(n["start_button"], n["end_button"]) for n in notes] == [(0, 2), (2, 4)]
+    assert notes[1]["modifier"].endswith("*")

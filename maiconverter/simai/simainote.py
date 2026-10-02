@@ -141,6 +141,15 @@ class SlideNote(SimaiNote):
         self.delay = delay
         self.reflect_position = reflect_position
         self.is_chain = is_chain
+        # Connected-slide bookkeeping. Filled in by link_chained_slides().
+        # chain_head: first segment of the connected slide (None if this
+        #   note is a head or a standalone slide).
+        # chain_next: the segment that continues from this one.
+        # chain_rel_start: time, in measures, between the head finishing its
+        #   delay and this segment starting to move.
+        self.chain_head: Optional["SlideNote"] = None
+        self.chain_next: Optional["SlideNote"] = None
+        self.chain_rel_start: float = 0.0
 
 
 class TouchTapNote(SimaiNote):
@@ -181,6 +190,63 @@ class BPM(Event):
 
         super().__init__(measure, EventType.bpm)
         self.bpm = bpm
+
+
+def link_chained_slides(slides, tolerance: float = 0.002) -> None:
+    """Attach every ma2 ``CN`` segment to the slide it continues.
+
+    A connected slide is ONE slide in simai: ``1-3[4:1]-5[4:1]``. The ``*``
+    operator is a different thing (a second slide from the same start button)
+    and makes the editor spawn an extra star, so segments must be merged
+    into their head instead of being exported as separate notes.
+
+    ma2 files are not consistent on how a CN line is timed (own measure with
+    zero delay, or head measure with the delay as an offset), so a segment is
+    matched to the open tail that ends on its start button and either ends
+    exactly when the segment begins, or starts at the same measure.
+    """
+    heads = [s for s in slides if not s.is_chain]
+    chains = [s for s in slides if s.is_chain]
+    chains.sort(key=lambda s: (s.measure, s.measure + s.delay))
+    open_tails = list(heads)
+
+    def tail_end(note) -> float:
+        head = note.chain_head or note
+        return head.measure + head.delay + note.chain_rel_start + note.duration
+
+    for seg in chains:
+        seg_start = seg.measure + seg.delay
+        best = None
+        best_score = None
+        for tail in open_tails:
+            if tail.end_position != seg.position or tail.chain_next is not None:
+                continue
+            head = tail.chain_head or tail
+            if abs(tail_end(tail) - seg_start) <= tolerance:
+                score = 0
+            elif abs(head.measure - seg.measure) <= tolerance:
+                score = 1
+            else:
+                continue
+            if best_score is None or score < best_score:
+                best, best_score = tail, score
+
+        if best is None:
+            # Orphan segment: keep it as a normal slide so it is not lost.
+            print(
+                f"Warning: chained slide at measure {seg.measure} "
+                f"(button {seg.position + 1}) has no parent slide"
+            )
+            seg.is_chain = False
+            open_tails.append(seg)
+            continue
+
+        head = best.chain_head or best
+        seg.chain_head = head
+        seg.chain_rel_start = best.chain_rel_start + best.duration
+        best.chain_next = seg
+        seg.measure = head.measure
+        open_tails.append(seg)
 
 
 def slide_to_pattern_str(slide_note: SlideNote) -> str:
